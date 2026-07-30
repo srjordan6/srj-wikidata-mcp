@@ -1,0 +1,33 @@
+# Render Blueprint for srj-wikidata-mcp.
+#
+# Separate service from srj-mcp on purpose: different credential (a Wikimedia
+# OAuth token rather than a Postgres URL), different blast radius. A bug here
+# should not be able to touch the audit database.
+#
+# After "Apply", set the two secrets in the dashboard — both are sync: false so
+# they are never committed.
+
+services:
+  - type: web
+    name: srj-wikidata-mcp
+    runtime: docker
+    region: ohio
+    plan: starter               # free tier spins down after 15 min idle
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: WIKIDATA_OAUTH_TOKEN
+        sync: false             # Wikimedia OAuth 2.0 owner-only access token
+      - key: WIKIDATA_MCP_TOKEN
+        sync: false             # 48+ char random admin bearer for curl probes
+      - key: WIKIDATA_MCP_ISSUER_URL
+        value: https://srj-wikidata-mcp.onrender.com
+      - key: WIKIDATA_USER_AGENT
+        value: "srj-wikidata-mcp/1.0 (https://srjconsultingservices.com; srj@srjconsultingservices.com)"
+      - key: WIKIDATA_WRITE_INTERVAL
+        value: "2.0"
+      - key: WIKIDATA_MAXLAG
+        value: "5"
+      - key: LOG_LEVEL
+        value: INFO
