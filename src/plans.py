@@ -109,10 +109,10 @@ def build_plan(
         qid = op.get("qid")
         if not qid:
             raise WikidataError(f"Operation {i}: 'qid' is required.")
-        if kind not in {"set_label", "set_description", "add_claim", "remove_claim"}:
+        if kind not in {"set_label", "set_description", "add_claim", "add_reference", "remove_claim"}:
             raise WikidataError(
                 f"Operation {i}: unknown op '{kind}'. Allowed: set_label, "
-                "set_description, add_claim, remove_claim."
+                "set_description, add_claim, add_reference, remove_claim."
             )
 
         entity_label = (
@@ -158,6 +158,26 @@ def build_plan(
             row["property"] = pid
             row["value"] = op["value"]
             row["datatype"] = op["datatype"]
+            row["references"] = refs
+
+        elif kind == "add_reference":
+            if not op.get("claim_guid"):
+                raise WikidataError(
+                    f"Operation {i}: 'claim_guid' is required. Get it from get_entity."
+                )
+            refs = op.get("references") or []
+            if not refs:
+                raise WikidataError(
+                    f"Operation {i}: 'references' is required and is the whole point "
+                    "of this operation. Supply a list of {property, value, datatype}."
+                )
+            bad = [r.get("property") for r in refs if r.get("property") not in REFERENCE_PROPERTIES]
+            if bad:
+                warnings.append(
+                    f"Op {i}: reference properties {bad} are unusual for a reference "
+                    "block; P854 (reference URL) or P248 (stated in) are the normal ones."
+                )
+            row["claim_guid"] = op["claim_guid"]
             row["references"] = refs
 
         elif kind == "remove_claim":
@@ -258,6 +278,12 @@ def apply_plan(plan_id: str, confirm: str) -> dict:
                     ]
                 }
                 client.edit_entity(qid, json.dumps(payload))
+            elif kind == "add_reference":
+                refsnaks: dict[str, list] = {}
+                for r in op["references"]:
+                    rs = _snak(r["property"], r["value"], r.get("datatype", "url"))
+                    refsnaks.setdefault(r["property"], []).append(rs)
+                client.set_reference(op["claim_guid"], json.dumps(refsnaks))
             elif kind == "remove_claim":
                 client.remove_claims([op["claim_guid"]])
             results.append({"op": kind, "qid": qid, "ok": True})

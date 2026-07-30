@@ -241,10 +241,13 @@ def plan_edits(operations: list, rationale: str) -> dict:
        "value": <see datatype>, "datatype": "wikibase-item|string|external-id|url|
        time|monolingualtext|quantity",
        "references": [{"property": "P854", "value": "https://...", "datatype": "url"}]}
+      {"op": "add_reference",   "qid": "Q...", "claim_guid": "Q...$GUID",
+       "references": [{"property": "P854", "value": "https://...", "datatype": "url"}]}
       {"op": "remove_claim",    "qid": "Q...", "claim_guid": "Q...$GUID"}
 
-    add_claim is REFUSED without at least one reference. Ceiling is 30 operations
-    per plan.
+    add_claim is REFUSED without at least one reference. add_reference attaches a
+    source to a statement that ALREADY exists — use it to fix unsourced claims
+    rather than duplicating them. Ceiling is 30 operations per plan.
 
     Args:
         operations: List of operation dicts as above.

@@ -241,6 +241,25 @@ class WikidataClient:
             }
         )
 
+    def set_reference(self, claim_guid: str, snaks_json: str) -> dict:
+        """Attach a reference block to an EXISTING statement.
+
+        This is the call that matters most for these items. wbeditentity can only
+        add a reference as part of a statement it is also creating, so sourcing a
+        claim that already exists needs wbsetreference against its GUID. Omitting
+        ``reference`` means add-new rather than replace, so this is additive and
+        will not clobber a reference someone else added.
+        """
+        return self._post(
+            {
+                "action": "wbsetreference",
+                "statement": claim_guid,
+                "snaks": snaks_json,
+                "summary": EDIT_TAG_SUMMARY,
+                "bot": 0,
+            }
+        )
+
 
 _client: WikidataClient | None = None
 
