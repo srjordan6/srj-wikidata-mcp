@@ -100,7 +100,6 @@ class WikidataClient:
             "formatversion": "2",
             "token": self.csrf_token(),
             "maxlag": MAXLAG,
-            "errorformat": "plaintext",
         }
         with httpx.Client(timeout=60) as c:
             r = c.post(API, data=body, headers=self._headers())
@@ -108,19 +107,42 @@ class WikidataClient:
             data = r.json()
         self._last_write = time.time()
 
-        if "error" in data:
-            err = data["error"]
-            code = err.get("code")
+        # MediaWiki reports failure in one of two shapes. Classic format gives a
+        # single "error" OBJECT; errorformat=plaintext gives an "errors" LIST.
+        # This client originally sent errorformat=plaintext while checking only
+        # the singular key, so every API failure was invisible and every call
+        # returned as a success. That silently reported 8 of 8 edits applied on
+        # 2026-08-02 when none had been written. errorformat is now not sent, and
+        # both shapes are checked, and a positive success marker is required, so
+        # a third shape cannot fail open the same way.
+        err: tuple[str | None, str] | None = None
+        if isinstance(data.get("error"), dict):
+            e = data["error"]
+            err = (e.get("code"), e.get("info") or e.get("*") or str(e))
+        elif isinstance(data.get("errors"), list) and data["errors"]:
+            e = data["errors"][0]
+            err = (e.get("code"), e.get("text") or e.get("*") or str(e))
+
+        if err:
+            code, info = err
             # A stale CSRF token is recoverable exactly once.
             if code == "badtoken":
                 self._csrf = None
                 raise WikidataError("badtoken: CSRF token was stale; retry the call")
             if code == "maxlag":
                 raise WikidataError(
-                    f"maxlag: Wikidata replication is behind ({err.get('info')}). "
+                    f"maxlag: Wikidata replication is behind ({info}). "
                     "Wait and retry — do not loop."
                 )
-            raise WikidataError(f"{code}: {err.get('info') or err}")
+            raise WikidataError(f"{code}: {info}")
+
+        # Positive confirmation. Never infer success from the absence of an error.
+        if not any(k in data for k in ("success", "entity", "claim", "claims", "pageinfo")):
+            raise WikidataError(
+                "Wikidata returned neither an error nor any success marker. "
+                "Treating this as a FAILED write rather than assuming it worked. "
+                f"Response keys: {sorted(data)}"
+            )
         return data
 
     def csrf_token(self) -> str:
