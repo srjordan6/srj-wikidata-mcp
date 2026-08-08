@@ -253,6 +253,29 @@ class WikidataClient:
             params["clear"] = 1
         return self._post(params)
 
+    def create_entity(self, data_json: str) -> dict:
+        """Create a NEW item via wbeditentity with new=item.
+
+        Deliberately separate from edit_entity so creation can never happen by
+        accident through a mistyped or empty qid. Returns the response, whose
+        entity.id carries the newly minted Q-id.
+
+        Item creation is the highest-consequence write this server performs: a
+        new item is visible immediately, is indexed by reusers, and if it fails
+        notability review the deletion discussion attaches publicly to its
+        subject. It is gated behind the same plan-and-approve flow as everything
+        else and should be used sparingly.
+        """
+        return self._post(
+            {
+                "action": "wbeditentity",
+                "new": "item",
+                "data": data_json,
+                "summary": EDIT_TAG_SUMMARY,
+                "bot": 0,
+            }
+        )
+
     def remove_claims(self, claim_guids: list[str]) -> dict:
         return self._post(
             {

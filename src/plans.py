@@ -107,12 +107,14 @@ def build_plan(
     for i, op in enumerate(operations, start=1):
         kind = op.get("op")
         qid = op.get("qid")
-        if not qid:
+        # create_item is the one operation with no qid, because the item does
+        # not exist yet. Everything else must name its target.
+        if not qid and kind != "create_item":
             raise WikidataError(f"Operation {i}: 'qid' is required.")
-        if kind not in {"set_label", "set_description", "add_claim", "add_reference", "remove_claim"}:
+        if kind not in {"set_label", "set_description", "add_claim", "add_reference", "remove_claim", "create_item"}:
             raise WikidataError(
                 f"Operation {i}: unknown op '{kind}'. Allowed: set_label, "
-                "set_description, add_claim, add_reference, remove_claim."
+                "set_description, add_claim, add_reference, remove_claim, create_item."
             )
 
         entity_label = (
@@ -179,6 +181,51 @@ def build_plan(
                 )
             row["claim_guid"] = op["claim_guid"]
             row["references"] = refs
+
+        elif kind == "create_item":
+            if not op.get("label"):
+                raise WikidataError(f"Operation {i}: 'label' is required for create_item.")
+            if not op.get("description"):
+                raise WikidataError(
+                    f"Operation {i}: 'description' is required for create_item. An item "
+                    "with no description is indistinguishable from its neighbours in "
+                    "search and is the first thing a patroller flags."
+                )
+            claims = op.get("claims") or []
+            if not claims:
+                raise WikidataError(
+                    f"Operation {i}: 'claims' is required for create_item. A label and "
+                    "description alone do not establish what the item is; at minimum give "
+                    "P31 instance of."
+                )
+            for n, c in enumerate(claims, start=1):
+                if not c.get("property") or not c.get("datatype") or c.get("value") is None:
+                    raise WikidataError(
+                        f"Operation {i}, claim {n}: property, value and datatype are all required."
+                    )
+            sourced = sum(1 for c in claims if c.get("references"))
+            if sourced == 0:
+                raise WikidataError(
+                    f"Operation {i}: REFUSED \u2014 not one claim on this new item carries a "
+                    "reference. A new item with no sourcing anywhere is the weakest possible "
+                    "position if its notability is ever questioned, and the deletion "
+                    "discussion attaches publicly to the subject. Source at least the "
+                    "identifying claims."
+                )
+            row["label"] = op["label"]
+            row["description"] = op["description"]
+            row["claim_count"] = len(claims)
+            row["sourced_claims"] = sourced
+            row["claims"] = claims
+            warnings.append(
+                f"Op {i}: CREATES A NEW WIKIDATA ITEM. This cannot be undone through this "
+                "server \u2014 deletion requires a community nomination. Confirm the subject "
+                "meets Wikidata notability before approving."
+            )
+            if sourced < len(claims):
+                warnings.append(
+                    f"Op {i}: {len(claims) - sourced} of {len(claims)} claims are unsourced."
+                )
 
         elif kind == "remove_claim":
             if not op.get("claim_guid"):
@@ -253,9 +300,10 @@ def apply_plan(plan_id: str, confirm: str) -> dict:
         )
 
     results: list[dict] = []
+    created: list[str] = []
     failed = 0
     for op in plan["raw"]:
-        kind, qid = op["op"], op["qid"]
+        kind, qid = op["op"], op.get("qid")
         try:
             if kind == "set_label":
                 client.set_label(qid, op["value"], op.get("language", "en"))
@@ -284,6 +332,38 @@ def apply_plan(plan_id: str, confirm: str) -> dict:
                     rs = _snak(r["property"], r["value"], r.get("datatype", "url"))
                     refsnaks.setdefault(r["property"], []).append(rs)
                 client.set_reference(op["claim_guid"], json.dumps(refsnaks))
+            elif kind == "create_item":
+                payload: dict = {
+                    "labels": {"en": {"language": "en", "value": op["label"]}},
+                    "descriptions": {"en": {"language": "en", "value": op["description"]}},
+                    "claims": [],
+                }
+                for c in op["claims"]:
+                    stmt: dict = {
+                        "mainsnak": _snak(c["property"], c["value"], c["datatype"]),
+                        "type": "statement",
+                        "rank": "normal",
+                    }
+                    if c.get("references"):
+                        rs: dict[str, list] = {}
+                        for r in c["references"]:
+                            rs.setdefault(r["property"], []).append(
+                                _snak(r["property"], r["value"], r.get("datatype", "url"))
+                            )
+                        stmt["references"] = [{"snaks": rs}]
+                    payload["claims"].append(stmt)
+                resp = client.create_entity(json.dumps(payload))
+                new_qid = (resp.get("entity") or {}).get("id")
+                if not new_qid:
+                    raise WikidataError(
+                        "Item creation returned no entity id; treating as failed rather "
+                        "than assuming an item was created."
+                    )
+                created.append(new_qid)
+                results.append({"op": kind, "qid": new_qid, "ok": True,
+                                "created": new_qid,
+                                "url": f"https://www.wikidata.org/wiki/{new_qid}"})
+                continue
             elif kind == "remove_claim":
                 client.remove_claims([op["claim_guid"]])
             results.append({"op": kind, "qid": qid, "ok": True})
@@ -300,6 +380,7 @@ def apply_plan(plan_id: str, confirm: str) -> dict:
         "status": plan["status"],
         "applied": len(results) - failed,
         "failed": failed,
+        "created_items": created,
         "results": results,
-        "verify": [f"https://www.wikidata.org/wiki/{q}" for q in plan["items_touched"]],
+        "verify": [f"https://www.wikidata.org/wiki/{q}" for q in plan["items_touched"] + created],
     }
