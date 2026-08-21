@@ -1,19 +1,57 @@
 # srj-wikidata-mcp
 
-MCP server for maintaining the Wikidata items belonging to Stephen R. Jordan,
-SRJ Consulting & Services LLC, and the published volumes of *The Operating
-Discipline for AI Library*.
+A Model Context Protocol server for editing Wikidata, built around one
+constraint: **an assistant cannot write a statement on its own.**
 
-| Subject | Item |
+It exists because maintaining an item properly is slow, repetitive work — a
+bibliographic record needs a title, a publication date, a page count, an ISBN
+and an identifier crosswalk, each one sourced — and that is exactly the kind of
+work an assistant should do and exactly the kind of work nobody should let an
+assistant do unsupervised. So it drafts and a human approves.
+
+Reads are unrestricted. Writes are two-step — a plan is drafted, rendered for
+review, and applied only on explicit confirmation. There is no single-claim
+write tool, and there is no way to add an unsourced claim.
+
+FastMCP, OAuth 2.1 + PKCE for Claude.ai's custom connector flow, Docker on
+Render, public `/healthz`.
+
+---
+
+## Why it is shaped this way
+
+Wikidata's bot policy requires community approval before automated editing, and
+an LLM writing statements through the API at volume **is** a bot whatever it is
+called. This server is built for the other thing: a human approving a small,
+sourced, reviewable batch that is attributable in the revision history.
+
+The constraints below are enforced in code, not documented as guidance.
+
+| Constraint | Effect |
 |---|---|
-| Stephen R. Jordan (person) | [Q140622333](https://www.wikidata.org/wiki/Q140622333) |
-| SRJ Consulting & Services LLC | [Q140622666](https://www.wikidata.org/wiki/Q140622666) |
-| Published volumes | separate items, linked from the person via `P800` notable work |
+| Every `add_claim` carries at least one reference | Unsourced claims are refused outright |
+| 30 operations per plan | Large edits must be split and reviewed in pieces |
+| Two seconds between writes, `maxlag=5`, `bot=0` | Respects the API under load rather than racing it |
+| Every edit summarised as assistant-prepared, human-approved | The revision history says what actually happened |
+| Plans live in memory only | A restart discards pending plans — an unapproved plan should not survive a deploy and get applied later against a changed item |
 
-Built to mirror `srj-mcp`: FastMCP, OAuth 2.1 + PKCE for Claude.ai's custom
-connector flow, Docker on Render, public `/healthz`. Deployed as a **separate
-service** on purpose — a different credential and a different blast radius, so a
-bug here cannot reach the audit database.
+`get_entity` returns a count of **unsourced statements** alongside the claims,
+because the number that matters when maintaining an item is not how many
+statements it has but how many of them a reader can check.
+
+### Writes report failure honestly
+
+An early version reported success whenever the API call did not raise. It did
+not check whether the response actually confirmed the edit, so a rejected write
+was indistinguishable from an accepted one. Every write path now confirms a
+positive success marker in the response before reporting success, and
+`apply_plan` returns per-operation results with the created or modified Q-id so
+the caller can verify independently rather than trusting the return value.
+
+This matters more than it sounds. An assistant that cannot tell a failed write
+from a successful one will confidently report work it never did.
+
+---
 
 ## Tools
 
@@ -23,10 +61,10 @@ bug here cannot reach the audit database.
 |---|---|
 | `health_check` | API reachable; reports whether writes are enabled and as which user |
 | `search_entity` | Find Q-ids or P-ids by name |
-| `get_entity` | Labels, descriptions, statements with claim GUIDs, **and a count of unsourced statements** |
+| `get_entity` | Labels, descriptions, statements with claim GUIDs, and a count of unsourced statements |
 | `sparql` | Read-only query against `query.wikidata.org` |
 
-**Writes** — two-step, no single-claim write tool exists.
+**Writes** — two-step.
 
 | Tool | Purpose |
 |---|---|
@@ -34,26 +72,10 @@ bug here cannot reach the audit database.
 | `apply_plan` | Execute a plan. Requires `confirm="I-CONFIRM-WIKIDATA-EDIT"` |
 | `list_plans` | Pending and applied plans in this process |
 
-## Why writes are shaped this way
+Supported operations: `create_item`, `set_label`, `set_description`,
+`add_claim`, `add_reference`, `remove_claim`.
 
-Wikidata's bot policy requires community approval before automated editing, and
-an LLM writing statements via the API at volume **is** a bot whatever it is
-called. This server is built for the other thing: a human approving a small,
-sourced, reviewable batch that is attributable in the revision history.
-
-Enforced, not advisory:
-
-- **Every `add_claim` must carry at least one reference.** Refused otherwise.
-  Both items currently have zero references on every statement, and with no
-  sitelinks their notability rests on being supported by serious publicly
-  available sources — so adding unsourced claims makes the deletion case
-  *stronger*, not weaker.
-- **30 operations per plan.** Split larger work.
-- **2 seconds between writes**, `maxlag=5`, `bot=0`, and every edit summarised as
-  `via srj-wikidata-mcp (assistant-prepared, human-approved batch)`.
-- **Plans live in memory.** A restart discards pending plans, which is correct:
-  an unapproved plan should not survive a deploy and get applied later against a
-  changed item.
+---
 
 ## Setup
 
@@ -62,8 +84,8 @@ Enforced, not advisory:
 At [Special:OAuthConsumerRegistration](https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose/oauth2):
 
 - Choose **OAuth 2.0**
-- Tick **"This consumer is for use only by <your username>"** (owner-only — no
-  third-party authorisation dance, and the token acts solely as you)
+- Tick **"This consumer is for use only by `<your username>`"** — owner-only, so
+  there is no third-party authorisation dance and the token acts solely as you
 - Grants: **Edit existing pages**, and **Create, edit, and move pages**
 - Copy the **access token** it issues
 
@@ -71,14 +93,8 @@ Leave `WIKIDATA_OAUTH_TOKEN` blank to run read-only. Every read tool still works
 
 ### 2. Deploy
 
-```bash
-git init && git add -A && git commit -m "srj-wikidata-mcp initial"
-git remote add origin <your remote>
-git push -u origin main
-```
-
 Render → New → Blueprint → point at this repo. `render.yaml` provisions it.
-Then set the two secrets in the dashboard (both are `sync: false`):
+Then set both secrets in the dashboard (both are `sync: false`):
 
 - `WIKIDATA_OAUTH_TOKEN`
 - `WIKIDATA_MCP_TOKEN` — `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`
@@ -86,12 +102,12 @@ Then set the two secrets in the dashboard (both are `sync: false`):
 ### 3. Verify
 
 ```bash
-curl https://srj-wikidata-mcp.onrender.com/healthz
+curl https://your-service.onrender.com/healthz
 ```
 
-Then add `https://srj-wikidata-mcp.onrender.com/mcp` as a custom connector in
-Claude settings and call `health_check`. If it returns `anonymous: true`, the
-OAuth token is invalid, expired, or missing the edit grant.
+Then add `https://your-service.onrender.com/mcp` as a custom connector in Claude
+settings and call `health_check`. If it returns `anonymous: true`, the OAuth
+token is invalid, expired, or missing the edit grant.
 
 ### Local
 
@@ -101,30 +117,25 @@ pip install -r requirements.txt
 uvicorn src.server:app --host 0.0.0.0 --port 8000
 ```
 
-## Known defects in the live items, as at 2026-07-29
+---
 
-Recorded in `srj_audit.career_narratives` under slug `wikidata-items`.
+## Sourcing statements
 
-1. **Every statement on both items has zero references.** Highest priority.
-2. Person item: LinkedIn personal profile ID is `stepherjordan` — a typo for
-   `stephenrjordan`. Currently a dead external link.
-3. Person item: *The AI Efficiency & Process Optimization™* appears **twice**
-   under notable work.
-4. Person item: no employer statements — Citi, Intel, McAfee, Optiv all absent.
-5. Company item: does not record the Nevada → Texas conversion of 22 May 2026.
-6. Neither item has sitelinks on any Wikimedia project.
+Statements should be sourced from material that already exists and is
+independently checkable — a publisher record, a library catalogue, a company
+registry — using `P854` (reference URL) or `P248` (stated in).
 
-## Sourcing
+Where two sources disagree, resolve the disagreement before citing either.
+Recording a date that a catalogue contradicts is worse than recording no date,
+because it creates a citation that fails on inspection.
 
-Statements should be sourced from material that already exists and is checkable:
+---
 
-- `srj_audit.press_books` and `press_book_isbns` — titles, page counts, ISBNs,
-  publication dates
-- Open Library editions — `OL62330768M`, `OL62330769M`, `OL62330772M`,
-  `OL62371435M`; author `OL16525496A`
-- OpenCorporates `us_tx/0806615653` — Texas registration
-- Library of Congress and Dewey classifications on Volumes I and III
+## Deployment note
 
-Use `P854` (reference URL) or `P248` (stated in). Note that
-`press_books.published_on` and Open Library disagree on Volumes I and III —
-resolve that before citing either as a publication date.
+This runs as a **separate service** from any other MCP server in the same
+account, on a different credential. A bug here cannot reach anything else.
+
+---
+
+Built by [Stephen R. Jordan](https://github.com/srjordan6)
