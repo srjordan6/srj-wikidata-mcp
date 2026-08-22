@@ -249,6 +249,21 @@ def plan_edits(operations: list, rationale: str) -> dict:
     source to a statement that ALREADY exists — use it to fix unsourced claims
     rather than duplicating them. Ceiling is 30 operations per plan.
 
+    QUALIFIERS. add_claim, and each claim inside create_item, accept an optional
+    "qualifiers" list in the same shape as references:
+
+        {"op": "add_claim", "qid": "Q...", "property": "P131",
+         "value": "Q1439", "datatype": "wikibase-item",
+         "qualifiers": [{"property": "P580", "value": "2026-05-22",
+                         "datatype": "time"}],
+         "references": [...]}
+
+    Use them whenever a statement is only true for part of its subject's life.
+    A company that moved from Nevada to Texas needs P131 Nevada with P582 end
+    time and P131 Texas with P580 start time; stating both without qualifiers
+    claims it is in two states at once, which is worse than recording neither.
+    Same for a role held between two dates, or a value that superseded another.
+
     Args:
         operations: List of operation dicts as above.
         rationale: One or more sentences on why this batch is being made. Becomes

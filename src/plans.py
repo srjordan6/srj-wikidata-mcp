@@ -41,6 +41,56 @@ REFERENCE_PROPERTIES = {"P248", "P854", "P143", "P4656", "P887"}
 _PLANS: dict[str, dict] = {}
 
 
+# Qualifiers that bound a statement in time. Called out by name because these
+# are the ones that turn a false statement into a true one: without P580/P582 a
+# company that moved from Nevada to Texas reads as being in both states at once,
+# which is worse than recording neither.
+TIME_BOUNDING_QUALIFIERS = {"P580", "P582", "P585"}
+
+
+def _validate_qualifiers(quals: Any, op_n: int, claim_n: int | None = None) -> list[dict]:
+    """Validate an optional qualifier list. Same shape as references:
+    {property, value, datatype}.
+
+    Qualifiers are how a statement says *when* or *in what respect* it holds.
+    They are optional, but when a statement needs one and does not have it the
+    statement is not merely incomplete, it is wrong — so this validates the
+    shape strictly and leaves the judgement about whether one is needed to the
+    caller, who can see the subject.
+    """
+    if not quals:
+        return []
+    where = f"Operation {op_n}" + (f", claim {claim_n}" if claim_n else "")
+    if not isinstance(quals, list):
+        raise WikidataError(f"{where}: 'qualifiers' must be a list of "
+                            "{property, value, datatype}.")
+    for q in quals:
+        if not isinstance(q, dict):
+            raise WikidataError(f"{where}: each qualifier must be an object.")
+        pid = q.get("property")
+        if not pid or not str(pid).startswith("P"):
+            raise WikidataError(f"{where}: qualifier 'property' must be a P-id.")
+        if q.get("value") is None:
+            raise WikidataError(f"{where}: qualifier {pid} has no 'value'.")
+        if not q.get("datatype"):
+            raise WikidataError(
+                f"{where}: qualifier {pid} has no 'datatype'. Give one of "
+                "wikibase-item, string, external-id, url, time, monolingualtext, "
+                "quantity — it cannot be guessed from the value."
+            )
+    return quals
+
+
+def _qualifier_snaks(quals: list[dict]) -> dict[str, list]:
+    """Group qualifiers into the {pid: [snak, ...]} shape wbeditentity expects."""
+    out: dict[str, list] = {}
+    for q in quals:
+        out.setdefault(q["property"], []).append(
+            _snak(q["property"], q["value"], q["datatype"])
+        )
+    return out
+
+
 def _snak(pid: str, value: Any, datatype: str) -> dict:
     """Build a mainsnak/reference snak. Only the value types actually needed for
     a person, a company and four books are supported; anything else should fail
@@ -157,10 +207,13 @@ def build_plan(
                     f"Op {i}: reference properties {bad} are unusual for a reference "
                     "block; P854 (reference URL) or P248 (stated in) are the normal ones."
                 )
+            quals = _validate_qualifiers(op.get("qualifiers"), i)
             row["property"] = pid
             row["value"] = op["value"]
             row["datatype"] = op["datatype"]
             row["references"] = refs
+            if quals:
+                row["qualifiers"] = quals
 
         elif kind == "add_reference":
             if not op.get("claim_guid"):
@@ -203,6 +256,7 @@ def build_plan(
                     raise WikidataError(
                         f"Operation {i}, claim {n}: property, value and datatype are all required."
                     )
+                _validate_qualifiers(c.get("qualifiers"), i, claim_n=n)
             sourced = sum(1 for c in claims if c.get("references"))
             if sourced == 0:
                 raise WikidataError(
@@ -325,6 +379,8 @@ def apply_plan(plan_id: str, confirm: str) -> dict:
                         }
                     ]
                 }
+                if op.get("qualifiers"):
+                    payload["claims"][0]["qualifiers"] = _qualifier_snaks(op["qualifiers"])
                 client.edit_entity(qid, json.dumps(payload))
             elif kind == "add_reference":
                 refsnaks: dict[str, list] = {}
@@ -351,6 +407,8 @@ def apply_plan(plan_id: str, confirm: str) -> dict:
                                 _snak(r["property"], r["value"], r.get("datatype", "url"))
                             )
                         stmt["references"] = [{"snaks": rs}]
+                    if c.get("qualifiers"):
+                        stmt["qualifiers"] = _qualifier_snaks(c["qualifiers"])
                     payload["claims"].append(stmt)
                 resp = client.create_entity(json.dumps(payload))
                 new_qid = (resp.get("entity") or {}).get("id")
