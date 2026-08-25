@@ -43,9 +43,25 @@ UA = os.environ.get(
 # ceiling so this can never look like an unapproved bot run.
 WRITE_INTERVAL = float(os.environ.get("WIKIDATA_WRITE_INTERVAL", "2.0"))
 # maxlag tells the API to reject our write if replication is behind by more than
-# this many seconds, rather than adding to the pile. 5 is the value Wikimedia
-# asks automated clients to use.
-MAXLAG = int(os.environ.get("WIKIDATA_MAXLAG", "5"))
+# this many seconds, rather than adding to the pile.
+#
+# 5 is the value Wikimedia asks BOTS to use, and 5 is what this ran at until
+# 2026-08-25, when four consecutive attempts to create one item were refused
+# over fifteen minutes by three different Query Service nodes (wdqs1012, 1013,
+# 1014) sitting 8 to 13 seconds behind. The main database was at 0.86 seconds
+# throughout and perfectly healthy.
+#
+# That is the case for raising it. maxlag weighs WDQS, the SPARQL service, which
+# a wbeditentity write never touches, and WDQS routinely runs hours behind. This
+# client sends bot=0, spaces writes two seconds apart, caps a batch at 30
+# operations and requires a human to approve every one — the traffic profile the
+# bot threshold exists to restrain is not the traffic profile this produces.
+#
+# 15 is still backpressure. A genuinely struggling cluster lags far past it, and
+# the write still refuses. It is calibrated to what this server is rather than to
+# what an unattended bot doing thousands of edits an hour would be. Raised on
+# Stephen's explicit instruction, not silently.
+MAXLAG = int(os.environ.get("WIKIDATA_MAXLAG", "15"))
 
 EDIT_TAG_SUMMARY = "via srj-wikidata-mcp (assistant-prepared, human-approved batch)"
 
@@ -131,8 +147,11 @@ class WikidataClient:
                 raise WikidataError("badtoken: CSRF token was stale; retry the call")
             if code == "maxlag":
                 raise WikidataError(
-                    f"maxlag: Wikidata replication is behind ({info}). "
-                    "Wait and retry — do not loop."
+                    f"maxlag: Wikidata replication is behind ({info}), past the "
+                    f"{MAXLAG}s ceiling this client backs off at. "
+                    "Wait and retry — do not loop. If the message names a wdqs* "
+                    "host the Query Service is the one lagging, not the database "
+                    "a write touches, and it can stay behind for hours."
                 )
             raise WikidataError(f"{code}: {info}")
 
