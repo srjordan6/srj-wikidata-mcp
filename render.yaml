@@ -28,6 +28,12 @@ services:
       - key: WIKIDATA_WRITE_INTERVAL
         value: "2.0"
       - key: WIKIDATA_MAXLAG
-        value: "5"
+        # 15, not the 5 Wikimedia publishes for bots. See the reasoning in
+        # src/wikidata.py: maxlag weighs the SPARQL Query Service, which a
+        # wbeditentity write never touches and which routinely runs hours
+        # behind, so 5 refuses writes over backpressure from a system this
+        # server does not use. Still backpressure, just calibrated to a
+        # human-approved batch client rather than an unattended bot.
+        value: "15"
       - key: LOG_LEVEL
         value: INFO
