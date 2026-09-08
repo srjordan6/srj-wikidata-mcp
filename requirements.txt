@@ -1,7 +1,9 @@
-# SRJ Wikidata MCP Server dependencies.
+﻿# SRJ Wikidata MCP Server dependencies.
 # Pinned to the same mcp release as srj-mcp so both services behave identically
 # under Claude.ai's connector flow.
 
-mcp[cli]==1.13.0
+mcp[cli]>=1.28.1,<2.0
 httpx==0.27.2
 python-dotenv==1.0.1
+
+
